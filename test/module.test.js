@@ -1272,6 +1272,99 @@ describe('no_prefix strategy', () => {
   })
 })
 
+describe('no_prefix strategy + custom paths', () => {
+  /** @type {Nuxt} */
+  let nuxt
+
+  beforeAll(async () => {
+    const override = {
+      i18n: {
+        strategy: 'no_prefix',
+        parsePages: false,
+        pages: {
+          about: {
+            en: '/about-us',
+            fr: '/a-propos'
+          },
+          index: false,
+          posts: {
+            fr: '/articles'
+          }
+        }
+      }
+    }
+
+    nuxt = (await setup(loadConfig(__dirname, 'no-lang-switcher', override, { merge: true }))).nuxt
+  })
+
+  afterAll(async () => {
+    await nuxt.close()
+  })
+
+  test('sets SEO metadata properly', async () => {
+    const html = await get('/')
+    const dom = getDom(html)
+    const seoTags = getSeoTags(dom)
+    expect(seoTags).toEqual(expect.arrayContaining([
+      {
+        tagName: 'meta',
+        property: 'og:locale',
+        content: 'en'
+      },
+      {
+        tagName: 'meta',
+        property: 'og:locale:alternate',
+        content: 'fr_FR'
+      }
+    ]))
+    expect(seoTags.filter(tag => tag.tagName === 'link')).toHaveLength(0)
+  })
+
+  test('/ contains EN text & link /about', async () => {
+    const html = await get('/')
+    const dom = getDom(html)
+    expect(dom.querySelector('#current-page')?.textContent).toBe('page: Homepage')
+
+    const currentLocale = dom.querySelector('#current-locale')
+    expect(currentLocale).not.toBeNull()
+    expect(currentLocale?.textContent).toBe('locale: en')
+
+    // TODO
+    const aboutLink = dom.querySelector('#link-about')
+    expect(aboutLink).not.toBeNull()
+    expect(aboutLink?.getAttribute('href')).toBe('/about')
+    expect(aboutLink?.textContent).toBe('About us')
+  })
+
+  test('/about contains EN text & link /', async () => {
+    const html = await get('/about-us')
+    const dom = getDom(html)
+    expect(dom.querySelector('#current-page')?.textContent).toBe('page: About us')
+
+    const homeLink = dom.querySelector('#link-home')
+    expect(homeLink).not.toBeNull()
+    expect(homeLink?.getAttribute('href')).toBe('/')
+    expect(homeLink?.textContent).toBe('Homepage')
+  })
+
+  test('/fr/ returns 404', async () => {
+    let response
+    try {
+      response = await get('/fr/')
+    } catch (error) {
+      response = error
+    }
+    expect(response.statusCode).toBe(404)
+  })
+
+  // TODO
+  test('localePath returns correct path', async () => {
+    const window = await nuxt.renderAndGetWindow(url('/'))
+    expect(window.$nuxt.localePath('about')).toBe('/about')
+    expect(window.$nuxt.localePath({ path: '/about' })).toBe('/about')
+  })
+})
+
 describe('no_prefix strategy + differentDomains', () => {
   /** @type {Nuxt} */
   let nuxt

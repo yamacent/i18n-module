@@ -1,3 +1,4 @@
+import { posix } from 'path'
 import { STRATEGIES } from './constants'
 import { extractComponentOptions } from './components'
 import { adjustRouteDefinitionForTrailingSlash, getPageOptions } from './utils'
@@ -10,9 +11,18 @@ import { adjustRouteDefinitionForTrailingSlash, getPageOptions } from './utils'
  *   trailingSlash: import('@nuxt/types/config/router').NuxtOptionsRouter['trailingSlash']
  * }} MakeRouteOptions
  *
+ * @typedef {{ n: string, p: string }} RouteEntry
+ * @typedef {{
+ *   all: RouteEntry[]
+ *   byName: Record<string, Record<import('../../types').Locale, RouteEntry>>
+ *   byPath: Record<string, Record<import('../../types').Locale, RouteEntry>>
+ * }} CustomRoutePaths
+ */
+
+/**
  * @param {NuxtRouteConfig[]} baseRoutes
  * @param {MakeRouteOptions} options
- * @return {NuxtRouteConfig[]}
+ * @return {{ localizedRoutes: NuxtRouteConfig[], customPathsMap: CustomRoutePaths[] }}
  */
 export function makeRoutes (baseRoutes, {
   defaultLocale,
@@ -30,17 +40,52 @@ export function makeRoutes (baseRoutes, {
 }) {
   /** @type {NuxtRouteConfig[]} */
   let localizedRoutes = []
+  /** @type {CustomRoutePaths} */
+  const customPathsMap = { byPath: {}, byName: {}, all: [] }
 
   /**
    * @param {NuxtRouteConfig} route
    * @param {readonly import('../../types').Locale[]} allowedLocaleCodes
-   * @param {boolean} [isChild=false]
+   * @param {string} parentRoutePath
    * @param {boolean} [isExtraRouteTree=false]
    * @return {NuxtRouteConfig | NuxtRouteConfig[]}
    */
-  const buildLocalizedRoutes = (route, allowedLocaleCodes, isChild = false, isExtraRouteTree = false) => {
+  const buildLocalizedRoutes = (route, allowedLocaleCodes, parentRoutePath = '', isExtraRouteTree = false) => {
     /** @type {NuxtRouteConfig[]} */
     const routes = []
+
+    /**
+     * Adds a route.
+     *
+     * @param {NuxtRouteConfig} localizedRoute
+     * @param {import('../../types').Locale} locale
+     * @param {string} parentRoutePath
+     */
+    const addRoute = (localizedRoute, locale, parentRoutePath) => {
+      routes.push(localizedRoute)
+
+      if (route.name) {
+        const fullPath = posix.join(parentRoutePath, route.path)
+        if (!customPathsMap.byName[route.name]) {
+          customPathsMap.byName[route.name] = {}
+        }
+        if (!customPathsMap.byPath[fullPath]) {
+          customPathsMap.byPath[fullPath] = {}
+        }
+
+        // For "prefix_and_default" strategy we take only first route (without the prefix) for given locale.
+        if (!customPathsMap.byName[route.name][locale] || !!customPathsMap.byPath[fullPath][locale]) {
+          const localizedFullPath = posix.join(parentRoutePath, localizedRoute.path)
+          const size = customPathsMap.all.push({ n: localizedRoute.name, p: localizedFullPath })
+          if (!customPathsMap.byName[route.name][locale]) {
+            customPathsMap.byName[route.name][locale] = customPathsMap.all[size - 1]
+          }
+          if (!customPathsMap.byPath[fullPath][locale]) {
+            customPathsMap.byPath[fullPath][locale] = customPathsMap.all[size - 1]
+          }
+        }
+      }
+    }
 
     // Skip route if it is only a redirect without a component.
     if (route.redirect && !route.component) {
@@ -88,18 +133,18 @@ export function makeRoutes (baseRoutes, {
         localizedRoute.name = name + routesNameSeparator + locale
       }
 
-      // Generate localized children routes if any
-      if (route.children) {
-        localizedRoute.children = []
-        for (let i = 0, length1 = route.children.length; i < length1; i++) {
-          localizedRoute.children = localizedRoute.children.concat(buildLocalizedRoutes(route.children[i], [locale], true, isExtraRouteTree))
-        }
-      }
-
       // Get custom path if any
       if (componentOptions.paths && componentOptions.paths[locale]) {
         // @ts-ignore
         path = componentOptions.paths[locale]
+      }
+
+      // Generate localized children routes if any
+      if (route.children) {
+        localizedRoute.children = []
+        for (let i = 0, length1 = route.children.length; i < length1; i++) {
+          localizedRoute.children = localizedRoute.children.concat(buildLocalizedRoutes(route.children[i], [locale], parentRoutePath + path, isExtraRouteTree))
+        }
       }
 
       const isDefaultLocale = locale === defaultLocale
@@ -108,7 +153,7 @@ export function makeRoutes (baseRoutes, {
       // - if it's a parent route, add it with default locale suffix added (no suffix if route has children)
       // - if it's a child route of that extra parent route, append default suffix to it
       if (isDefaultLocale && strategy === STRATEGIES.PREFIX_AND_DEFAULT) {
-        if (!isChild) {
+        if (!parentRoutePath) {
           const defaultRoute = { ...localizedRoute, path }
 
           if (name) {
@@ -120,20 +165,21 @@ export function makeRoutes (baseRoutes, {
             defaultRoute.children = []
             for (const childRoute of route.children) {
               // isExtraRouteTree argument is true to indicate that this is extra route added for PREFIX_AND_DEFAULT strategy
-              defaultRoute.children = defaultRoute.children.concat(buildLocalizedRoutes(childRoute, [locale], true, true))
+              defaultRoute.children = defaultRoute.children.concat(buildLocalizedRoutes(childRoute, [locale], path, true))
             }
           }
 
-          routes.push(defaultRoute)
-        } else if (isChild && isExtraRouteTree && name) {
+          addRoute(defaultRoute, locale, parentRoutePath)
+        } else if (parentRoutePath && isExtraRouteTree && name) {
           localizedRoute.name += routesNameSeparator + defaultLocaleRouteNameSuffix
         }
       }
 
-      const isChildWithRelativePath = isChild && !path.startsWith('/')
+      const isChildWithRelativePath = parentRoutePath && !path.startsWith('/')
 
       // Add route prefix if needed
       const shouldAddPrefix = (
+        strategy !== STRATEGIES.NO_PREFIX &&
         // No prefix if app uses different locale domains
         !differentDomains &&
         // No need to add prefix if child's path is relative
@@ -154,14 +200,12 @@ export function makeRoutes (baseRoutes, {
       }
 
       if (shouldAddPrefix && isDefaultLocale && strategy === STRATEGIES.PREFIX && includeUprefixedFallback) {
-        routes.push({
-          ...route
-        })
+        addRoute({ path: route.path, redirect: path }, locale, parentRoutePath)
       }
 
       localizedRoute.path = path
 
-      routes.push(localizedRoute)
+      addRoute(localizedRoute, locale, parentRoutePath)
     }
 
     return routes
@@ -182,5 +226,7 @@ export function makeRoutes (baseRoutes, {
     }
   }
 
-  return localizedRoutes
+  console.info(JSON.stringify(customPathsMap, null, 2))
+
+  return { localizedRoutes, customPathsMap }
 }
